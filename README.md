@@ -22,6 +22,6 @@ ok       KERNELBASE.dll                           C:\Windows\system32\KERNELBASE
 ## Building
 
 ```
-> cl deps.cpp
+> cl deps.cpp /EHsc /O2
 ```
 
