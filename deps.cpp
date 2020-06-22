@@ -465,7 +465,6 @@ int main(int argc, char** argv) {
         // Load from System Directory
         if (!DllData.Data) {
             Path = SysDir + "\\" + Entry->Name;
-            printf("Checking: %s\n", Path.c_str());
             DllData = ReadEntireFile(Path.c_str());
         }
 
