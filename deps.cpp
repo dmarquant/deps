@@ -15,6 +15,59 @@
 
 #include <windows.h>
 
+struct file_mapping
+{
+    HANDLE File;
+    HANDLE Mapping;
+    size_t Size;
+    uint8_t* Data;
+};
+
+file_mapping CreateReadOnlyFileMapping(const char* Path)
+{
+    file_mapping FileMapping = {};
+
+    HANDLE File = CreateFileA(Path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (File == INVALID_HANDLE_VALUE)
+    {
+        return FileMapping;
+    }
+
+    LARGE_INTEGER FileSize;
+    GetFileSizeEx(File, &FileSize);
+    size_t Size = FileSize.QuadPart;
+
+    HANDLE Mapping = CreateFileMappingA(File, NULL, PAGE_READONLY, 0, 0, NULL);
+    if (Mapping == INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(File);
+        return FileMapping;
+    }
+
+    void* Data = MapViewOfFile(Mapping, FILE_MAP_READ, 0, 0, Size);
+    if (Data == NULL)
+    {
+        CloseHandle(Mapping);
+        CloseHandle(File);
+        return FileMapping;
+    }
+
+    FileMapping.File = File;
+    FileMapping.Mapping = Mapping;
+    FileMapping.Size = Size;
+    FileMapping.Data = (uint8_t*)Data;
+    return FileMapping;
+}
+
+void CloseFileMapping(file_mapping* Mapping)
+{
+    UnmapViewOfFile(Mapping->Data);
+    CloseHandle(Mapping->Mapping);
+    CloseHandle(Mapping->File);
+    memset(Mapping, 0, sizeof(file_mapping));
+}
+
+
 int32_t BinReadI32(uint8_t* Data) {
     int32_t Value;
     memcpy(&Value, Data, sizeof(int32_t));
@@ -268,37 +321,6 @@ std::vector<std::string> PEGetImportDlls(portable_executable* PE) {
     return ImportDlls;
 }
 
-typedef struct {
-    int Size;
-    uint8_t* Data;
-} buffer;
-
-buffer ReadEntireFile(const char* Path) {
-    buffer Buffer = {};
-    
-    FILE* File = fopen(Path, "rb");
-    if (File)
-    {
-        fseek(File, 0, SEEK_END);
-        int FileSize = ftell(File);
-        fseek(File, 0, SEEK_SET);
-
-        uint8_t* Data = (uint8_t*)malloc(FileSize);
-        if (FileSize == fread(Data, 1, FileSize, File)) {
-            Buffer.Data = Data;
-            Buffer.Size = FileSize;
-        }
-        else {
-            free(Data);
-        }
-    }
-    return Buffer;
-}
-
-void FreeBuffer(buffer* Buffer) {
-    free(Buffer->Data);
-}
-
 std::vector<std::string> StringSplit(const char* Str, char Sep) {
     std::vector<std::string> Splits;
 
@@ -410,7 +432,6 @@ std::string GetCurrentDir() {
 
 int main(int argc, char** argv) {
     // TODO: Use Unicode (wstrings)
-    // TODO: Do memory mapping of the .dlls instead
     // TODO: Handle api-ms-*.dll correctly
     // TODO: Ignore common windows dlls (ws2_32.dll, kernel32.dll, etc.)
 
@@ -428,18 +449,18 @@ int main(int argc, char** argv) {
     std::string WinDir = GetWindowsDir();
     std::string CurrentDir = GetCurrentDir();
     
-    buffer ExeData = ReadEntireFile(ExePath);
-    if (!ExeData.Data) {
-        printf("Failed to read exe!\n");
+    file_mapping ExeMapping = CreateReadOnlyFileMapping(ExePath);
+    if (!ExeMapping.Data) {
+        printf("Failed to open exe!\n");
         return 1;
     }
 
     std::vector<dll_entry> DllEntries;
 
     portable_executable PE = {};
-    PEInit(&PE, ExeData.Data, ExeData.Size);
+    PEInit(&PE, ExeMapping.Data, ExeMapping.Size);
     std::vector<std::string> ImportDlls = PEGetImportDlls(&PE);
-    FreeBuffer(&ExeData);
+    CloseFileMapping(&ExeMapping);
 
     uint32_t MachineType = PE.CoffHeader.Machine;
     
@@ -458,50 +479,50 @@ int main(int argc, char** argv) {
         dll_entry* Entry = &DllEntries[I];
 
         // Try to load the .dll on all paths until it is found
-        buffer DllData = {};
+        file_mapping DllMapping = {};
         std::string Path = Entry->RefererPath + "\\" + Entry->Name;
-        DllData = ReadEntireFile(Path.c_str());
+        DllMapping = CreateReadOnlyFileMapping(Path.c_str());
 
         // Load from System Directory
-        if (!DllData.Data) {
+        if (!DllMapping.Data) {
             Path = SysDir + "\\" + Entry->Name;
-            DllData = ReadEntireFile(Path.c_str());
+            DllMapping = CreateReadOnlyFileMapping(Path.c_str());
         }
 
         // Here comes the 16-bit system directory but this seems to be useless nowadays
 
         // Load from Windows Directory
-        if (!DllData.Data) {
+        if (!DllMapping.Data) {
             Path = WinDir + "\\" + Entry->Name;
-            DllData = ReadEntireFile(Path.c_str());
+            DllMapping = CreateReadOnlyFileMapping(Path.c_str());
         }
 
         // Search on current dir
-        if (!DllData.Data) {
+        if (!DllMapping.Data) {
             Path = CurrentDir + "\\" + Entry->Name;
-            DllData = ReadEntireFile(Path.c_str());
+            DllMapping = CreateReadOnlyFileMapping(Path.c_str());
         }
         
         // Search on environment path
-        if (!DllData.Data) {
+        if (!DllMapping.Data) {
             for (int P = 0; P < Paths.size(); P++) {
                 Path = Paths[P] + "\\" + Entry->Name;
-                DllData = ReadEntireFile(Path.c_str());
+                DllMapping = CreateReadOnlyFileMapping(Path.c_str());
 
-                if (DllData.Data) {
+                if (DllMapping.Data) {
                     break;
                 }
             }
         }
 
-        if (DllData.Data) {
+        if (DllMapping.Data) {
             Entry->PathToDll = Path;
             Entry->WasFound = true;
         }
 
         if (Entry->WasFound) {
             portable_executable PE = {};
-            PEInit(&PE, DllData.Data, DllData.Size);
+            PEInit(&PE, DllMapping.Data, DllMapping.Size);
             std::vector<std::string> ImportDlls = PEGetImportDlls(&PE);
 
             Entry->Architecture = PE.CoffHeader.Machine;
@@ -517,7 +538,7 @@ int main(int argc, char** argv) {
                 }
             }
 
-            FreeBuffer(&DllData);
+            CloseFileMapping(&DllMapping);
         }
     }
 
