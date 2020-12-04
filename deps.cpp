@@ -1,6 +1,12 @@
 // References
 // - https://docs.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-search-order
 // - https://docs.microsoft.com/en-us/windows/win32/debug/pe-formt
+//
+// Notes:
+// Dll filenames use the local code page. Which means if special characters
+// are used in dlls names the exectuable linking it will not be portable to other 
+// systems with a different local encoding. The paths to dlls however can contain
+// any unicode character.
 // 
 #define _CRT_SECURE_NO_WARNINGS
 #include <stdio.h>
@@ -9,6 +15,7 @@
 #include <string.h>
 #include <stdarg.h>
 
+#include <codecvt>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -23,11 +30,11 @@ struct file_mapping
     uint8_t* Data;
 };
 
-file_mapping CreateReadOnlyFileMapping(const char* Path)
+file_mapping CreateReadOnlyFileMapping(const wchar_t* Path)
 {
     file_mapping FileMapping = {};
 
-    HANDLE File = CreateFileA(Path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    HANDLE File = CreateFileW(Path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (File == INVALID_HANDLE_VALUE)
     {
         return FileMapping;
@@ -37,7 +44,7 @@ file_mapping CreateReadOnlyFileMapping(const char* Path)
     GetFileSizeEx(File, &FileSize);
     size_t Size = FileSize.QuadPart;
 
-    HANDLE Mapping = CreateFileMappingA(File, NULL, PAGE_READONLY, 0, 0, NULL);
+    HANDLE Mapping = CreateFileMappingW(File, NULL, PAGE_READONLY, 0, 0, NULL);
     if (Mapping == INVALID_HANDLE_VALUE)
     {
         CloseHandle(File);
@@ -287,8 +294,8 @@ uint32_t PEGetOffsetForRVA(portable_executable* PE, uint32_t RVA) {
     return SectionOffset + RVA - SectionVA;
 }
 
-std::vector<std::string> PEGetImportDlls(portable_executable* PE) {
-    std::vector<std::string> ImportDlls;
+std::vector<std::wstring> PEGetImportDlls(portable_executable* PE) {
+    std::vector<std::wstring> ImportDlls;
 
     uint32_t ImportTableRVA;
     if (PE->OptionalHeader.Magic == 0x10b) {
@@ -314,27 +321,31 @@ std::vector<std::string> PEGetImportDlls(portable_executable* PE) {
 
         // Lookup name
         int NameOffset = PEGetOffsetForRVA(PE, Entry.NameRVA);
-        ImportDlls.push_back((const char*)(PE->ImageData + NameOffset));
+        std::string importDllName = (const char*)(PE->ImageData + NameOffset);
+
+        // Convert dll to Unicode
+        std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+        ImportDlls.push_back(converter.from_bytes(importDllName));
 
         ImportTableP += sizeof(import_directory_entry);
     }
     return ImportDlls;
 }
 
-std::vector<std::string> StringSplit(const char* Str, char Sep) {
-    std::vector<std::string> Splits;
+std::vector<std::wstring> StringSplit(const wchar_t* Str, wchar_t Sep) {
+    std::vector<std::wstring> Splits;
 
-    const char* Start = Str;
+    const wchar_t* Start = Str;
     while (*Str != 0) {
         if (*Str == Sep) {
-            std::string Split(Start, Str);
+            std::wstring Split(Start, Str);
             Splits.push_back(Split);
             Start = Str + 1;
         }
 
         Str++;
     }
-    std::string Split(Start, Str);
+    std::wstring Split(Start, Str);
     Splits.push_back(Split);
 
     return Splits;
@@ -343,21 +354,21 @@ std::vector<std::string> StringSplit(const char* Str, char Sep) {
 // Entry of a referenced dll
 struct dll_entry {
     // Name of this entry
-    std::string Name = "";
+    std::wstring Name = L"";
 
     // Path of the .dll or .exe referecing this dll (for local lookup)
-    std::string RefererPath = "";
+    std::wstring RefererPath = L"";
 
     // Was this .dll found?
     bool WasFound = false;
 
     // The path where this dll was found
-    std::string PathToDll = "";
+    std::wstring PathToDll = L"";
 
     uint32_t Architecture;
 };
 
-bool HasDllEntry(const std::vector<dll_entry>& DllEntries, std::string Name) {
+bool HasDllEntry(const std::vector<dll_entry>& DllEntries, std::wstring Name) {
     for (int I = 0; I < DllEntries.size(); I++) {
         // TODO: Case insensitive
         if (DllEntries[I].Name == Name) {
@@ -367,7 +378,7 @@ bool HasDllEntry(const std::vector<dll_entry>& DllEntries, std::string Name) {
     return false;
 }
 
-bool StringStartsWith(const std::string& Str, const std::string& With) {
+bool StringStartsWith(const std::wstring& Str, const std::wstring& With) {
     if (Str.size() < With.size())
         return false;
 
@@ -379,21 +390,21 @@ bool StringStartsWith(const std::string& Str, const std::string& With) {
     return true;
 }
 
-std::string GetPathToFile(std::string FilePath) {
+std::wstring GetPathToFile(std::wstring FilePath) {
     int I;
     for (I = FilePath.size() - 1; I > 0; I--) {
-        if (FilePath[I] == '/' || FilePath[I] == '\\') {
+        if (FilePath[I] == L'/' || FilePath[I] == L'\\') {
             break;
         }
     }
     if (I == 0) {
-        return ".";
+        return L".";
     }
 
     return FilePath.substr(0, I);
 }
 
-void PrintWithColor(int ColorAttribute, const char* Format, ...) {
+void PrintWithColor(int ColorAttribute, const wchar_t* Format, ...) {
     HANDLE Console = GetStdHandle(STD_OUTPUT_HANDLE);
 
     CONSOLE_SCREEN_BUFFER_INFO Info;
@@ -405,49 +416,49 @@ void PrintWithColor(int ColorAttribute, const char* Format, ...) {
 
     va_list Args;
     va_start(Args, Format);
-    vprintf(Format, Args);
+    vwprintf(Format, Args);
     va_end(Args);
 
 
     SetConsoleTextAttribute(Console, OriginalColor);
 }
 
-std::string GetSystemDir() {
-    char Path[MAX_PATH];
-    GetSystemDirectoryA(Path, MAX_PATH);
+std::wstring GetSystemDir() {
+    wchar_t Path[MAX_PATH];
+    GetSystemDirectoryW(Path, MAX_PATH);
     return Path;
 }
 
-std::string GetWindowsDir() {
-    char Path[MAX_PATH];
-    GetWindowsDirectoryA(Path, MAX_PATH);
+std::wstring GetWindowsDir() {
+    wchar_t Path[MAX_PATH];
+    GetWindowsDirectoryW(Path, MAX_PATH);
     return Path;
 }
 
-std::string GetCurrentDir() {
-    char Path[MAX_PATH];
-    GetCurrentDirectoryA(MAX_PATH, Path);
+std::wstring GetCurrentDir() {
+    wchar_t Path[MAX_PATH];
+    GetCurrentDirectoryW(MAX_PATH, Path);
     return Path;
 }
 
-int main(int argc, char** argv) {
-    // TODO: Use Unicode (wstrings)
+int wmain(int argc, wchar_t** argv) {
     // TODO: Handle api-ms-*.dll correctly
     // TODO: Ignore common windows dlls (ws2_32.dll, kernel32.dll, etc.)
+    // TODO: Make more robust against invalid files (maybe use fuzzing)
 
     if (argc != 2) {
         printf("Please specify .exe/.dll to analyze.\n");
         return 1;
     }
 
-    std::vector<std::string> Paths = StringSplit(getenv("PATH"), ';');
+    std::vector<std::wstring> Paths = StringSplit(_wgetenv(L"PATH"), ';');
 
-    const char* ExePath = argv[1];
-    std::string ExeDir  = GetPathToFile(ExePath);
+    const wchar_t* ExePath = argv[1];
+    std::wstring ExeDir  = GetPathToFile(ExePath);
 
-    std::string SysDir = GetSystemDir();
-    std::string WinDir = GetWindowsDir();
-    std::string CurrentDir = GetCurrentDir();
+    std::wstring SysDir     = GetSystemDir();
+    std::wstring WinDir     = GetWindowsDir();
+    std::wstring CurrentDir = GetCurrentDir();
     
     file_mapping ExeMapping = CreateReadOnlyFileMapping(ExePath);
     if (!ExeMapping.Data) {
@@ -459,14 +470,14 @@ int main(int argc, char** argv) {
 
     portable_executable PE = {};
     PEInit(&PE, ExeMapping.Data, ExeMapping.Size);
-    std::vector<std::string> ImportDlls = PEGetImportDlls(&PE);
+    std::vector<std::wstring> ImportDlls = PEGetImportDlls(&PE);
     CloseFileMapping(&ExeMapping);
 
     uint32_t MachineType = PE.CoffHeader.Machine;
     
     // Fill initial list of dll entries
     for (int I = 0; I < ImportDlls.size(); I++) {
-        if (!StringStartsWith(ImportDlls[I], "api-ms-")) {
+        if (!StringStartsWith(ImportDlls[I], L"api-ms-")) {
             dll_entry DllEntry = {};
             DllEntry.Name = ImportDlls[I];
             DllEntry.RefererPath = ExeDir;
@@ -480,12 +491,12 @@ int main(int argc, char** argv) {
 
         // Try to load the .dll on all paths until it is found
         file_mapping DllMapping = {};
-        std::string Path = Entry->RefererPath + "\\" + Entry->Name;
+        std::wstring Path = Entry->RefererPath + L"\\" + Entry->Name;
         DllMapping = CreateReadOnlyFileMapping(Path.c_str());
 
         // Load from System Directory
         if (!DllMapping.Data) {
-            Path = SysDir + "\\" + Entry->Name;
+            Path = SysDir + L"\\" + Entry->Name;
             DllMapping = CreateReadOnlyFileMapping(Path.c_str());
         }
 
@@ -493,20 +504,20 @@ int main(int argc, char** argv) {
 
         // Load from Windows Directory
         if (!DllMapping.Data) {
-            Path = WinDir + "\\" + Entry->Name;
+            Path = WinDir + L"\\" + Entry->Name;
             DllMapping = CreateReadOnlyFileMapping(Path.c_str());
         }
 
         // Search on current dir
         if (!DllMapping.Data) {
-            Path = CurrentDir + "\\" + Entry->Name;
+            Path = CurrentDir + L"\\" + Entry->Name;
             DllMapping = CreateReadOnlyFileMapping(Path.c_str());
         }
         
         // Search on environment path
         if (!DllMapping.Data) {
             for (int P = 0; P < Paths.size(); P++) {
-                Path = Paths[P] + "\\" + Entry->Name;
+                Path = Paths[P] + L"\\" + Entry->Name;
                 DllMapping = CreateReadOnlyFileMapping(Path.c_str());
 
                 if (DllMapping.Data) {
@@ -523,12 +534,12 @@ int main(int argc, char** argv) {
         if (Entry->WasFound) {
             portable_executable PE = {};
             PEInit(&PE, DllMapping.Data, DllMapping.Size);
-            std::vector<std::string> ImportDlls = PEGetImportDlls(&PE);
+            std::vector<std::wstring> ImportDlls = PEGetImportDlls(&PE);
 
             Entry->Architecture = PE.CoffHeader.Machine;
 
             for (int J = 0; J < ImportDlls.size(); J++) {
-                if (!StringStartsWith(ImportDlls[J], "api-ms-")) {
+                if (!StringStartsWith(ImportDlls[J], L"api-ms-")) {
                     if (!HasDllEntry(DllEntries, ImportDlls[J])) {
                         dll_entry DllEntry = {};
                         DllEntry.Name = ImportDlls[J];
@@ -543,7 +554,7 @@ int main(int argc, char** argv) {
     }
 
     // Display Results
-    printf("Dlls of %s\n", ExePath);
+    wprintf(L"Dlls of %s\n", ExePath);
 
     for (int I = 0; I < DllEntries.size(); I++) {
         dll_entry* Entry = &DllEntries[I];
@@ -551,15 +562,15 @@ int main(int argc, char** argv) {
         const char* status;
         if (Entry->WasFound) {
             if (Entry->Architecture != MachineType) {
-                PrintWithColor(12, "%-8s", "arch");
+                PrintWithColor(12, L"%-8s", L"arch");
             } else {
-                PrintWithColor(10, "%-8s", "ok");
+                PrintWithColor(10, L"%-8s", L"ok");
             }
         } else {
-            PrintWithColor(12, "%-8s", "missing");
+            PrintWithColor(12, L"%-8s", L"missing");
         }
 
-        printf(" %-40s %s\n", Entry->Name.c_str(), Entry->PathToDll.c_str());
+        wprintf(L" %-40s %s\n", Entry->Name.c_str(), Entry->PathToDll.c_str());
     }
 
     return 0;
