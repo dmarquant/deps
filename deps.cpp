@@ -368,10 +368,20 @@ struct dll_entry {
     uint32_t Architecture;
 };
 
+std::wstring ToUpper(const std::wstring& String)
+{
+    std::wstring Upper = String;
+    for (wchar_t& C: Upper)
+    {
+        C = towupper(C);
+    }
+    return Upper;
+}
+
 bool HasDllEntry(const std::vector<dll_entry>& DllEntries, std::wstring Name) {
     for (int I = 0; I < DllEntries.size(); I++) {
         // TODO: Case insensitive
-        if (DllEntries[I].Name == Name) {
+        if (ToUpper(DllEntries[I].Name) == ToUpper(Name)) {
             return true;
         }
     }
